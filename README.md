@@ -4,7 +4,9 @@
 [![Platform](https://img.shields.io/badge/platform-STC8G1K08A-orange.svg)](http://www.stcmcudata.com/)
 [![Protocol](https://img.shields.io/badge/protocol-MQTT-green.svg)](https://mqtt.org/)
 
-Warning：本项目从未发布至 GitCode，如您发现请截图并保留证据
+⚠️ **WARNING**
+> 
+> **本项目从未发布至 GitCode，如您在任何平台（尤其是 GitCode）发现本项目的镜像或副本，请截图并保留证据。**
 
 基于 STC8G1K08A 单片机的物联网温湿度监测系统，通过 ESP8266 WiFi 模块连接 OneNet 云平台，实现数据上传和远程控制。
 
