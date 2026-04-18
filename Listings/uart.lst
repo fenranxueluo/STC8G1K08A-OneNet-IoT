@@ -1,0 +1,468 @@
+C51 COMPILER V9.60.7.0   UART                                                              04/18/2026 15:28:01 PAGE 1   
+
+
+C51 COMPILER V9.60.7.0, COMPILATION OF MODULE UART
+OBJECT MODULE PLACED IN .\Objects\uart.obj
+COMPILER INVOKED BY: D:\keil\C51\BIN\C51.EXE uart.c OPTIMIZE(8,SPEED) BROWSE INCDIR(.\bsp) DEBUG OBJECTEXTEND PRINT(.\Li
+                    -stings\uart.lst) TABS(2) OBJECT(.\Objects\uart.obj)
+
+line level    source
+
+   1          #include "STC8G.h"
+   2          #include "Delay.h"
+   3          #include <string.h>
+   4          
+   5          /* 全局变量 */
+   6          unsigned char led_state = 0;
+   7          
+   8          /* 串口缓冲区 */
+   9          #define ESP8266_BUFFER_SIZE 128
+  10          static unsigned char xdata ESP8266_Buffer[ESP8266_BUFFER_SIZE];
+  11          static unsigned char buffer_index = 0;
+  12          static unsigned char g_cmd_response_ready = 0;
+  13          
+  14          /* OneNet配置 - 存储在Flash节省RAM */
+  15          #define NAME "your_device_name"
+  16          #define ID "your_device_id"
+  17          #define TOKEN "your_token"
+  18          
+  19          /* WiFi配置 - 请根据实际修改 */
+  20          #define WIFI_SSID "your_wifi_ssid"
+  21          #define WIFI_PASS "your_wifi_password"
+  22          
+  23          /* MQTT服务器配置 */
+  24          #define ONENET_SERVER "mqtts.heclouds.com"
+  25          #define ONENET_PORT 1883
+  26          
+  27          /**
+  28           * @brief UART初始化 115200bps@11.0592MHz
+  29           */
+  30          void UART_Init(void) {
+  31   1          SCON = 0x50;
+  32   1          AUXR |= 0x40;
+  33   1          AUXR &= 0xFE;
+  34   1          TMOD &= 0x0F;
+  35   1          TL1 = 0xE8;
+  36   1          TH1 = 0xFF;
+  37   1          ET1 = 0;
+  38   1          TR1 = 1;
+  39   1          P_SW1 &= ~0xc0;
+  40   1      }
+  41          
+  42          /**
+  43           * @brief 发送单个字节（带超时保护）
+  44           * @param Byte 要发送的字节
+  45           * @return 0-超时失败，1-成功
+  46           */
+  47          unsigned char UART_SendByte(unsigned char Byte) {
+  48   1          unsigned int timeout = 10000;
+  49   1          ES = 0;
+  50   1          TI = 0;
+  51   1          SBUF = Byte;
+  52   1          while (TI == 0 && --timeout);
+  53   1          TI = 0;
+  54   1          ES = 1;
+C51 COMPILER V9.60.7.0   UART                                                              04/18/2026 15:28:01 PAGE 2   
+
+  55   1          return timeout > 0 ? 1 : 0;
+  56   1      }
+  57          
+  58          /**
+  59           * @brief 发送字符串
+  60           */
+  61          void UART_SendString(unsigned char *str) {
+  62   1          while (*str != '\0') {
+  63   2              UART_SendByte(*str);
+  64   2              Delay_us(5);
+  65   2              str++;
+  66   2          }
+  67   1      }
+  68          
+  69          /**
+  70           * @brief 等待AT指令响应
+  71           * @param expect 期望的响应字符串
+  72           * @param timeout_ms 超时时间（毫秒）
+  73           * @return 0-超时，1-成功
+  74           */
+  75          static unsigned char ESP8266_WaitResponse(unsigned char *expect, unsigned int timeout_ms) {
+  76   1          unsigned int count = 0;
+  77   1          g_cmd_response_ready = 0;
+  78   1      
+  79   1          while (count < timeout_ms) {
+  80   2              if (g_cmd_response_ready) {
+  81   3                  g_cmd_response_ready = 0;
+  82   3                  if (strstr((char*)ESP8266_Buffer, (char*)expect) != NULL) {
+  83   4                      return 1;
+  84   4                  }
+  85   3              }
+  86   2              Delay_ms(1);
+  87   2              count++;
+  88   2          }
+  89   1          return 0;
+  90   1      }
+  91          
+  92          /**
+  93           * @brief 发送AT指令并等待响应
+  94           * @param cmd 指令字符串
+  95           * @param expect 期望响应
+  96           * @param timeout_ms 超时时间
+  97           * @return 0-失败，1-成功
+  98           */
+  99          static unsigned char ESP8266_SendCmd(unsigned char *cmd, unsigned char *expect, unsigned int timeout_ms) {
+ 100   1          UART_SendString(cmd);
+ 101   1          return ESP8266_WaitResponse(expect, timeout_ms);
+ 102   1      }
+ 103          
+ 104          /**
+ 105           * @brief 整型转字符串（轻量级，替代sprintf）
+ 106           * @param num 整数
+ 107           * @param buf 输出缓冲区
+ 108           * @return 字符串长度
+ 109           */
+ 110          static unsigned char IntToString(int num, unsigned char *buf) {
+ 111   1          unsigned char i = 0, j;
+ 112   1          unsigned char is_negative = 0;
+ 113   1          unsigned char temp[8];
+ 114   1          
+ 115   1          if (num < 0) {
+ 116   2              is_negative = 1;
+C51 COMPILER V9.60.7.0   UART                                                              04/18/2026 15:28:01 PAGE 3   
+
+ 117   2              num = -num;
+ 118   2          }
+ 119   1          
+ 120   1          do {
+ 121   2              temp[i++] = num % 10 + '0';
+ 122   2              num /= 10;
+ 123   2          } while (num > 0);
+ 124   1          
+ 125   1          if (is_negative) {
+ 126   2              temp[i++] = '-';
+ 127   2          }
+ 128   1          
+ 129   1          /* 反转 */
+ 130   1          for (j = 0; j < i; j++) {
+ 131   2              buf[j] = temp[i - 1 - j];
+ 132   2          }
+ 133   1          buf[i] = '\0';
+ 134   1          return i;
+ 135   1      }
+ 136          
+ 137          /**
+ 138           * @brief 构建WiFi连接命令
+ 139           */
+ 140          static void BuildWiFiCmd(unsigned char *buf) {
+ 141   1          unsigned char i = 0;
+ 142   1          unsigned char *ssid = WIFI_SSID;
+ 143   1          unsigned char *pass = WIFI_PASS;
+ 144   1          
+ 145   1          buf[i++] = 'A'; buf[i++] = 'T'; buf[i++] = '+';
+ 146   1          buf[i++] = 'C'; buf[i++] = 'W'; buf[i++] = 'J';
+ 147   1          buf[i++] = 'A'; buf[i++] = 'P'; buf[i++] = '=';
+ 148   1          buf[i++] = '"';
+ 149   1          while (*ssid) buf[i++] = *ssid++;
+ 150   1          buf[i++] = '"'; buf[i++] = ','; buf[i++] = '"';
+ 151   1          while (*pass) buf[i++] = *pass++;
+ 152   1          buf[i++] = '"'; 
+ 153   1          buf[i++] = '\r'; buf[i++] = '\n';
+ 154   1          buf[i] = '\0';
+ 155   1      }
+ 156          
+ 157          /**
+ 158           * @brief 构建MQTT配置命令
+ 159           */
+ 160          static void BuildMQTTConfigCmd(unsigned char *buf) {
+ 161   1          unsigned char i = 0;
+ 162   1          unsigned char *name = NAME;
+ 163   1          unsigned char *id = ID;
+ 164   1          unsigned char *token = TOKEN;
+ 165   1          
+ 166   1          buf[i++] = 'A'; buf[i++] = 'T'; buf[i++] = '+';
+ 167   1          buf[i++] = 'M'; buf[i++] = 'Q'; buf[i++] = 'T';
+ 168   1          buf[i++] = 'T'; buf[i++] = 'U'; buf[i++] = 'S';
+ 169   1          buf[i++] = 'E'; buf[i++] = 'R'; buf[i++] = 'C';
+ 170   1          buf[i++] = 'F'; buf[i++] = 'G'; buf[i++] = '=';
+ 171   1          buf[i++] = '0'; buf[i++] = ','; buf[i++] = '1';
+ 172   1          buf[i++] = ','; buf[i++] = '"';
+ 173   1          while (*name) buf[i++] = *name++;
+ 174   1          buf[i++] = '"'; buf[i++] = ','; buf[i++] = '"';
+ 175   1          while (*id) buf[i++] = *id++;
+ 176   1          buf[i++] = '"'; buf[i++] = ','; buf[i++] = '"';
+ 177   1          while (*token) buf[i++] = *token++;
+ 178   1          buf[i++] = '"'; buf[i++] = ','; buf[i++] = '0';
+C51 COMPILER V9.60.7.0   UART                                                              04/18/2026 15:28:01 PAGE 4   
+
+ 179   1          buf[i++] = ','; buf[i++] = '0'; buf[i++] = ',';
+ 180   1          buf[i++] = '"'; buf[i++] = '"'; 
+ 181   1          buf[i++] = '\r'; buf[i++] = '\n';
+ 182   1          buf[i] = '\0';
+ 183   1      }
+ 184          
+ 185          /**
+ 186           * @brief 构建MQTT连接命令
+ 187           */
+ 188          static void BuildMQTTConnCmd(unsigned char *buf) {
+ 189   1          unsigned char i = 0;
+ 190   1          unsigned char *server = ONENET_SERVER;
+ 191   1          
+ 192   1          buf[i++] = 'A'; buf[i++] = 'T'; buf[i++] = '+';
+ 193   1          buf[i++] = 'M'; buf[i++] = 'Q'; buf[i++] = 'T';
+ 194   1          buf[i++] = 'T'; buf[i++] = 'C'; buf[i++] = 'O';
+ 195   1          buf[i++] = 'N'; buf[i++] = 'N'; buf[i++] = '=';
+ 196   1          buf[i++] = '0'; buf[i++] = ','; buf[i++] = '"';
+ 197   1          while (*server) buf[i++] = *server++;
+ 198   1          buf[i++] = '"'; buf[i++] = ','; 
+ 199   1          buf[i++] = '1'; buf[i++] = '8'; buf[i++] = '8';
+ 200   1          buf[i++] = '3'; buf[i++] = ','; buf[i++] = '1';
+ 201   1          buf[i++] = '\r'; buf[i++] = '\n';
+ 202   1          buf[i] = '\0';
+ 203   1      }
+ 204          
+ 205          /**
+ 206           * @brief ESP8266初始化
+ 207           * @return 0-失败，1-成功
+ 208           */
+ 209          unsigned char ESP8266_Init(void) {
+ 210   1          unsigned char xdata cmd_buf[128];
+ 211   1          unsigned char retry = 0;
+ 212   1      
+ 213   1          /* 复位模块 */
+ 214   1          UART_SendString("AT+RST\r\n");
+ 215   1          Delay_ms(2000);
+ 216   1      
+ 217   1          /* 测试AT指令 */
+ 218   1          for (retry = 0; retry < 3; retry++) {
+ 219   2              if (ESP8266_SendCmd("AT\r\n", "OK", 1000)) {
+ 220   3                  break;
+ 221   3              }
+ 222   2          }
+ 223   1          if (retry >= 3) return 0;
+ 224   1      
+ 225   1          /* 设置STA模式 */
+ 226   1          if (!ESP8266_SendCmd("AT+CWMODE=1\r\n", "OK", 1000)) return 0;
+ 227   1      
+ 228   1          /* 启用DHCP */
+ 229   1          if (!ESP8266_SendCmd("AT+CWDHCP=1,1\r\n", "OK", 1000)) return 0;
+ 230   1      
+ 231   1          /* 连接WiFi */
+ 232   1          BuildWiFiCmd(cmd_buf);
+ 233   1          for (retry = 0; retry < 3; retry++) {
+ 234   2              UART_SendString(cmd_buf);
+ 235   2              if (ESP8266_WaitResponse("OK", 10000)) {
+ 236   3                  break;
+ 237   3              }
+ 238   2              Delay_ms(1000);
+ 239   2          }
+ 240   1          if (retry >= 3) return 0;
+C51 COMPILER V9.60.7.0   UART                                                              04/18/2026 15:28:01 PAGE 5   
+
+ 241   1      
+ 242   1          /* 配置MQTT */
+ 243   1          BuildMQTTConfigCmd(cmd_buf);
+ 244   1          if (!ESP8266_SendCmd(cmd_buf, "OK", 2000)) return 0;
+ 245   1      
+ 246   1          /* 连接MQTT服务器 */
+ 247   1          BuildMQTTConnCmd(cmd_buf);
+ 248   1          for (retry = 0; retry < 3; retry++) {
+ 249   2              UART_SendString(cmd_buf);
+ 250   2              if (ESP8266_WaitResponse("OK", 5000)) {
+ 251   3                  break;
+ 252   3              }
+ 253   2              Delay_ms(1000);
+ 254   2          }
+ 255   1          
+ 256   1          return retry < 3 ? 1 : 0;
+ 257   1      }
+ 258          
+ 259          /**
+ 260           * @brief 订阅控制主题
+ 261           * @return 0-失败，1-成功
+ 262           */
+ 263          unsigned char ESP8266_SubscribeSetTopic(void) {
+ 264   1          unsigned char xdata cmd_buf[128];
+ 265   1          unsigned char i = 0;
+ 266   1          unsigned char *id = ID;
+ 267   1          unsigned char *name = NAME;
+ 268   1          
+ 269   1          cmd_buf[i++] = 'A'; cmd_buf[i++] = 'T'; cmd_buf[i++] = '+';
+ 270   1          cmd_buf[i++] = 'M'; cmd_buf[i++] = 'Q'; cmd_buf[i++] = 'T';
+ 271   1          cmd_buf[i++] = 'T'; cmd_buf[i++] = 'S'; cmd_buf[i++] = 'U';
+ 272   1          cmd_buf[i++] = 'B'; cmd_buf[i++] = '='; cmd_buf[i++] = '0';
+ 273   1          cmd_buf[i++] = ','; cmd_buf[i++] = '"';
+ 274   1          cmd_buf[i++] = '$'; cmd_buf[i++] = 's'; cmd_buf[i++] = 'y';
+ 275   1          cmd_buf[i++] = 's'; cmd_buf[i++] = '/';
+ 276   1          while (*id) cmd_buf[i++] = *id++;
+ 277   1          cmd_buf[i++] = '/';
+ 278   1          while (*name) cmd_buf[i++] = *name++;
+ 279   1          cmd_buf[i++] = '/'; cmd_buf[i++] = 't'; cmd_buf[i++] = 'h';
+ 280   1          cmd_buf[i++] = 'i'; cmd_buf[i++] = 'n'; cmd_buf[i++] = 'g';
+ 281   1          cmd_buf[i++] = '/'; cmd_buf[i++] = 'p'; cmd_buf[i++] = 'r';
+ 282   1          cmd_buf[i++] = 'o'; cmd_buf[i++] = 'p'; cmd_buf[i++] = 'e';
+ 283   1          cmd_buf[i++] = 'r'; cmd_buf[i++] = 't'; cmd_buf[i++] = 'y';
+ 284   1          cmd_buf[i++] = '/'; cmd_buf[i++] = 's'; cmd_buf[i++] = 'e';
+ 285   1          cmd_buf[i++] = 't'; cmd_buf[i++] = '"'; cmd_buf[i++] = ',';
+ 286   1          cmd_buf[i++] = '0'; 
+ 287   1          cmd_buf[i++] = '\r'; cmd_buf[i++] = '\n';
+ 288   1          cmd_buf[i] = '\0';
+ 289   1          
+ 290   1          return ESP8266_SendCmd(cmd_buf, "OK", 2000);
+ 291   1      }
+ 292          
+ 293          /**
+ 294           * @brief 发布温湿度数据
+ 295           * @param temp_x10 温度值（放大10倍）
+ 296           * @param hum_x10 湿度值（放大10倍）
+ 297           */
+ 298          void ESP8266_PublishMessage(int temp_x10, int hum_x10) {
+ 299   1          unsigned char xdata msg_buf[160];
+ 300   1          unsigned char i = 0;
+ 301   1          unsigned char temp_buf[8], hum_buf[8];
+ 302   1          unsigned char temp_len, hum_len;
+C51 COMPILER V9.60.7.0   UART                                                              04/18/2026 15:28:01 PAGE 6   
+
+ 303   1          int temp_int, temp_dec, hum_int, hum_dec;
+ 304   1          unsigned char *id = ID;
+ 305   1          unsigned char *name = NAME;
+ 306   1          
+ 307   1          /* 计算温度值 */
+ 308   1          temp_int = temp_x10 / 10;
+ 309   1          temp_dec = temp_x10 % 10;
+ 310   1          if (temp_dec < 0) temp_dec = -temp_dec;
+ 311   1          
+ 312   1          /* 计算湿度值 */
+ 313   1          hum_int = hum_x10 / 10;
+ 314   1          hum_dec = hum_x10 % 10;
+ 315   1          if (hum_dec < 0) hum_dec = -hum_dec;
+ 316   1          
+ 317   1          /* 转换为字符串 */
+ 318   1          temp_len = IntToString(temp_int, temp_buf);
+ 319   1          hum_len = IntToString(hum_int, hum_buf);
+ 320   1          
+ 321   1          /* 构建MQTT发布命令 */
+ 322   1          msg_buf[i++] = 'A'; msg_buf[i++] = 'T'; msg_buf[i++] = '+';
+ 323   1          msg_buf[i++] = 'M'; msg_buf[i++] = 'Q'; msg_buf[i++] = 'T';
+ 324   1          msg_buf[i++] = 'T'; msg_buf[i++] = 'P'; msg_buf[i++] = 'U';
+ 325   1          msg_buf[i++] = 'B'; msg_buf[i++] = '='; msg_buf[i++] = '0';
+ 326   1          msg_buf[i++] = ','; msg_buf[i++] = '"';
+ 327   1          msg_buf[i++] = '$'; msg_buf[i++] = 's'; msg_buf[i++] = 'y';
+ 328   1          msg_buf[i++] = 's'; msg_buf[i++] = '/';
+ 329   1          while (*id) msg_buf[i++] = *id++;
+ 330   1          msg_buf[i++] = '/';
+ 331   1          while (*name) msg_buf[i++] = *name++;
+ 332   1          msg_buf[i++] = '/'; msg_buf[i++] = 't'; msg_buf[i++] = 'h';
+ 333   1          msg_buf[i++] = 'i'; msg_buf[i++] = 'n'; msg_buf[i++] = 'g';
+ 334   1          msg_buf[i++] = '/'; msg_buf[i++] = 'p'; msg_buf[i++] = 'r';
+ 335   1          msg_buf[i++] = 'o'; msg_buf[i++] = 'p'; msg_buf[i++] = 'e';
+ 336   1          msg_buf[i++] = 'r'; msg_buf[i++] = 't'; msg_buf[i++] = 'y';
+ 337   1          msg_buf[i++] = '/'; msg_buf[i++] = 'p'; msg_buf[i++] = 'o';
+ 338   1          msg_buf[i++] = 's'; msg_buf[i++] = 't'; msg_buf[i++] = '"';
+ 339   1          msg_buf[i++] = ','; msg_buf[i++] = '"';
+ 340   1          msg_buf[i++] = '{'; msg_buf[i++] = '"'; msg_buf[i++] = 'i';
+ 341   1          msg_buf[i++] = 'd'; msg_buf[i++] = '"'; msg_buf[i++] = ':';
+ 342   1          msg_buf[i++] = '"'; msg_buf[i++] = '1'; msg_buf[i++] = '2';
+ 343   1          msg_buf[i++] = '3'; msg_buf[i++] = '"'; msg_buf[i++] = ',';
+ 344   1          msg_buf[i++] = '"'; msg_buf[i++] = 'p'; msg_buf[i++] = 'a';
+ 345   1          msg_buf[i++] = 'r'; msg_buf[i++] = 'a'; msg_buf[i++] = 'm';
+ 346   1          msg_buf[i++] = 's'; msg_buf[i++] = '"'; msg_buf[i++] = ':';
+ 347   1          msg_buf[i++] = '{'; msg_buf[i++] = '"'; msg_buf[i++] = 't';
+ 348   1          msg_buf[i++] = 'e'; msg_buf[i++] = 'm'; msg_buf[i++] = 'p';
+ 349   1          msg_buf[i++] = '"'; msg_buf[i++] = ':'; msg_buf[i++] = '{';
+ 350   1          msg_buf[i++] = '"'; msg_buf[i++] = 'v'; msg_buf[i++] = 'a';
+ 351   1          msg_buf[i++] = 'l'; msg_buf[i++] = 'u'; msg_buf[i++] = 'e';
+ 352   1          msg_buf[i++] = '"'; msg_buf[i++] = ':';
+ 353   1          
+ 354   1          /* 添加温度值 */
+ 355   1          {
+ 356   2              unsigned char j;
+ 357   2              for (j = 0; j < temp_len; j++) msg_buf[i++] = temp_buf[j];
+ 358   2              msg_buf[i++] = '.';
+ 359   2              msg_buf[i++] = temp_dec + '0';
+ 360   2          }
+ 361   1          
+ 362   1          msg_buf[i++] = '}'; msg_buf[i++] = ','; msg_buf[i++] = '"';
+ 363   1          msg_buf[i++] = 'h'; msg_buf[i++] = 'u'; msg_buf[i++] = 'm';
+ 364   1          msg_buf[i++] = '"'; msg_buf[i++] = ':'; msg_buf[i++] = '{';
+C51 COMPILER V9.60.7.0   UART                                                              04/18/2026 15:28:01 PAGE 7   
+
+ 365   1          msg_buf[i++] = '"'; msg_buf[i++] = 'v'; msg_buf[i++] = 'a';
+ 366   1          msg_buf[i++] = 'l'; msg_buf[i++] = 'u'; msg_buf[i++] = 'e';
+ 367   1          msg_buf[i++] = '"'; msg_buf[i++] = ':';
+ 368   1          
+ 369   1          /* 添加湿度值 */
+ 370   1          {
+ 371   2              unsigned char j;
+ 372   2              for (j = 0; j < hum_len; j++) msg_buf[i++] = hum_buf[j];
+ 373   2              msg_buf[i++] = '.';
+ 374   2              msg_buf[i++] = hum_dec + '0';
+ 375   2          }
+ 376   1          
+ 377   1          msg_buf[i++] = '}'; msg_buf[i++] = '}'; msg_buf[i++] = '}';
+ 378   1          msg_buf[i++] = '"'; msg_buf[i++] = ','; msg_buf[i++] = '0';
+ 379   1          msg_buf[i++] = ','; msg_buf[i++] = '0'; 
+ 380   1          msg_buf[i++] = '\r'; msg_buf[i++] = '\n';
+ 381   1          msg_buf[i] = '\0';
+ 382   1          
+ 383   1          UART_SendString(msg_buf);
+ 384   1      }
+ 385          
+ 386          /**
+ 387           * @brief 解析控制命令
+ 388           */
+ 389          static void Parse_Command(unsigned char *str) {
+ 390   1          unsigned char *ptr = strstr((char*)str, "\"LED\":");
+ 391   1          if (ptr) {
+ 392   2              ptr += 6;
+ 393   2              if (*ptr == '1') {
+ 394   3                  led_state = 1;
+ 395   3              } else if (*ptr == '0') {
+ 396   3                  led_state = 0;
+ 397   3              }
+ 398   2          }
+ 399   1      }
+ 400          
+ 401          /**
+ 402           * @brief 串口中断服务程序
+ 403           */
+ 404          void UART1_Routine(void) interrupt 4 {
+ 405   1          unsigned char ch;
+ 406   1      
+ 407   1          if (TI) {
+ 408   2              TI = 0;
+ 409   2          }
+ 410   1      
+ 411   1          if (RI) {
+ 412   2              RI = 0;
+ 413   2              ch = SBUF;
+ 414   2      
+ 415   2              /* 缓冲区溢出保护 */
+ 416   2              if (buffer_index >= ESP8266_BUFFER_SIZE - 1) {
+ 417   3                  buffer_index = 0;
+ 418   3              }
+ 419   2      
+ 420   2              ESP8266_Buffer[buffer_index++] = ch;
+ 421   2      
+ 422   2              /* 检测到行结束符，设置响应标志 */
+ 423   2              if (ch == '\n') {
+ 424   3                  ESP8266_Buffer[buffer_index] = '\0';
+ 425   3                  g_cmd_response_ready = 1;
+ 426   3                  Parse_Command(ESP8266_Buffer);
+C51 COMPILER V9.60.7.0   UART                                                              04/18/2026 15:28:01 PAGE 8   
+
+ 427   3                  buffer_index = 0;
+ 428   3              }
+ 429   2          }
+ 430   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   5101    ----
+   CONSTANT SIZE    =    150    ----
+   XDATA SIZE       =    128     416
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =      3     100
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

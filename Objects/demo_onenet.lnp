@@ -1,0 +1,6 @@
+".\Objects\STARTUP.obj",
+".\Objects\main.obj",
+".\Objects\Delay.obj",
+".\Objects\uart.obj" 
+TO ".\Objects\demo_onenet" 
+PRINT(".\Listings\demo_onenet.m51") RAMSIZE(256) 

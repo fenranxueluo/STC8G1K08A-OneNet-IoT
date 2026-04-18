@@ -1,0 +1,205 @@
+C51 COMPILER V9.60.7.0   MAIN                                                              04/18/2026 15:28:01 PAGE 1   
+
+
+C51 COMPILER V9.60.7.0, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN .\Objects\main.obj
+COMPILER INVOKED BY: D:\keil\C51\BIN\C51.EXE main.c OPTIMIZE(8,SPEED) BROWSE INCDIR(.\bsp) DEBUG OBJECTEXTEND PRINT(.\Li
+                    -stings\main.lst) TABS(2) OBJECT(.\Objects\main.obj)
+
+line level    source
+
+   1          #include "STC8G.h"
+   2          #include "Delay.h"
+   3          #include "uart.h"
+   4          #include "dht11.h"
+   5          #include "oled.h"
+   6          
+   7          /* 全局变量 */
+   8          extern unsigned char led_state;
+   9          DHT11_Data dht_data;
+  10          
+  11          /* 标志位 */
+  12          volatile unsigned char g_dht11_ready = 0;
+  13          volatile unsigned char g_data_updated = 0;
+  14          
+  15          /* 温度湿度显示值（放大10倍存储，避免float运算） */
+  16          volatile int g_temp_x10 = 0;
+  17          volatile int g_hum_x10 = 0;
+  18          
+  19          /* 系统状态 */
+  20          volatile unsigned char g_system_error = 0;
+  21          #define ERROR_WIFI_INIT     0x01
+  22          #define ERROR_MQTT_CONN     0x02
+  23          #define ERROR_SENSOR_READ   0x04
+  24          
+  25          /* 看门狗喂狗周期计数 */
+  26          static unsigned char wdt_counter = 0;
+  27          
+  28          /**
+  29           * @brief Timer0 初始化
+  30           * @note 11.0592MHz时钟，模式1（16位定时器），50ms中断一次
+  31           *       定时器计算公式：65536 - (11059200/12/20) = 65536 - 46080 = 19456
+  32           */
+  33          void Timer0_Init(void) {
+  34   1          TMOD &= 0xF0;
+  35   1          TMOD |= 0x01;
+  36   1          TH0 = 0x4B;  /* (65536 - 46080) / 256 = 76 = 0x4C, 修正为0x4B确保50ms */
+  37   1          TL0 = 0x00;  /* (65536 - 46080) % 256 = 0 */
+  38   1          ET0 = 1;
+  39   1          TR0 = 1;
+  40   1      }
+  41          
+  42          /**
+  43           * @brief 看门狗初始化
+  44           * @note 约2秒超时
+  45           */
+  46          void WDT_Init(void) {
+  47   1          WDT_CONTR = 0x27;  /* EN_WDT=1, CLR_WDT=0, IDL_WDT=0, PS2=0, PS1=1, PS0=1 */
+  48   1      }
+  49          
+  50          /**
+  51           * @brief 喂狗
+  52           */
+  53          void WDT_Feed(void) {
+  54   1          WDT_CONTR |= 0x10;  /* CLR_WDT位置1 */
+C51 COMPILER V9.60.7.0   MAIN                                                              04/18/2026 15:28:01 PAGE 2   
+
+  55   1      }
+  56          
+  57          /**
+  58           * @brief 显示错误信息
+  59           */
+  60          static void ShowError(unsigned char error_code) {
+  61   1          OLED_Clear();
+  62   1          OLED_ShowString(0, 0, "Error:");
+  63   1          if (error_code & ERROR_WIFI_INIT) {
+  64   2              OLED_ShowString(0, 2, "WiFi Failed");
+  65   2          }
+  66   1          if (error_code & ERROR_MQTT_CONN) {
+  67   2              OLED_ShowString(0, 4, "MQTT Failed");
+  68   2          }
+  69   1      }
+  70          
+  71          /**
+  72           * @brief 主函数
+  73           */
+  74          void main(void) {
+  75   1          unsigned char wifi_retry = 0;
+  76   1          
+  77   1          /* GPIO初始化 */
+  78   1          /* P3.2 - DHT11数据线（输入模式） */
+  79   1          P3M0 &= ~(1 << 2);
+  80   1          P3M1 |= (1 << 2);
+  81   1          /* P3.3 - LED控制（推挽输出） */
+  82   1          P3M0 |= (1 << 3);
+  83   1          P3M1 &= ~(1 << 3);
+  84   1          /* P5.4/P5.5 - I2C OLED（准双向模式） */
+  85   1          P5M0 &= ~0x30;
+  86   1          P5M1 &= ~0x30;
+  87   1      
+  88   1          UART_Init();
+  89   1          OLED_Init();
+  90   1          Timer0_Init();
+  91   1          WDT_Init();
+  92   1          EA = 1;
+  93   1      
+  94   1          /* 初始化显示 */
+  95   1          OLED_ShowString(0, 0, "Init...");
+  96   1          
+  97   1          /* WiFi初始化，带重试 */
+  98   1          for (wifi_retry = 0; wifi_retry < 3; wifi_retry++) {
+  99   2              if (ESP8266_Init()) {
+ 100   3                  break;
+ 101   3              }
+ 102   2              Delay_ms(2000);
+ 103   2          }
+ 104   1          
+ 105   1          if (wifi_retry >= 3) {
+ 106   2              g_system_error |= ERROR_WIFI_INIT;
+ 107   2              ShowError(g_system_error);
+ 108   2              /* 继续运行，尝试离线模式 */
+ 109   2          } else {
+ 110   2              /* 订阅控制主题 */
+ 111   2              if (!ESP8266_SubscribeSetTopic()) {
+ 112   3                  g_system_error |= ERROR_MQTT_CONN;
+ 113   3              }
+ 114   2          }
+ 115   1      
+ 116   1          OLED_Clear();
+C51 COMPILER V9.60.7.0   MAIN                                                              04/18/2026 15:28:01 PAGE 3   
+
+ 117   1          OLED_ShowString(0, 0, "Temp: ");
+ 118   1          OLED_ShowString(0, 2, "Hum: ");
+ 119   1      
+ 120   1          while (1) {
+ 121   2              /* LED控制 */
+ 122   2              P33 = led_state;
+ 123   2      
+ 124   2              /* DHT11数据采集任务 */
+ 125   2              if (g_dht11_ready) {
+ 126   3                  g_dht11_ready = 0;
+ 127   3      
+ 128   3                  if (DHT11_Read(&dht_data)) {
+ 129   4                      /* 整数运算替代float，结果放大10倍 */
+ 130   4                      g_temp_x10 = dht_data.temp_int * 10 + dht_data.temp_dec;
+ 131   4                      g_hum_x10 = dht_data.hum_int * 10 + dht_data.hum_dec;
+ 132   4                      g_data_updated = 1;
+ 133   4      
+ 134   4                      /* 更新OLED显示 */
+ 135   4                      OLED_ShowIntWithDecimal(40, 0, g_temp_x10, 2);
+ 136   4                      OLED_ShowIntWithDecimal(40, 2, g_hum_x10, 2);
+ 137   4      
+ 138   4                      /* 上传数据到OneNet（仅在无错误时） */
+ 139   4                      if (g_system_error == 0) {
+ 140   5                          ESP8266_PublishMessage(g_temp_x10, g_hum_x10);
+ 141   5                      }
+ 142   4                  } else {
+ 143   4                      g_system_error |= ERROR_SENSOR_READ;
+ 144   4                  }
+ 145   3                  
+ 146   3                  /* 喂狗 */
+ 147   3                  WDT_Feed();
+ 148   3                  wdt_counter = 0;
+ 149   3              }
+ 150   2          }
+ 151   1      }
+ 152          
+ 153          /**
+ 154           * @brief Timer0中断服务程序
+ 155           * @note 每50ms进入一次，仅设置标志位，不执行耗时操作
+ 156           */
+ 157          void Timer0_ISR(void) interrupt 1 {
+ 158   1          static unsigned char tick_count = 0;
+ 159   1      
+ 160   1          TH0 = 0x4B;
+ 161   1          TL0 = 0x00;
+ 162   1      
+ 163   1          tick_count++;
+ 164   1          if (tick_count >= 80) {  /* 80 * 50ms = 4000ms = 4秒 */
+ 165   2              tick_count = 0;
+ 166   2              g_dht11_ready = 1;
+ 167   2          }
+ 168   1          
+ 169   1          /* 看门狗计数 */
+ 170   1          wdt_counter++;
+ 171   1          if (wdt_counter >= 30) {  /* 1.5秒必须喂狗一次 */
+ 172   2              WDT_Feed();
+ 173   2              wdt_counter = 0;
+ 174   2          }
+ 175   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+C51 COMPILER V9.60.7.0   MAIN                                                              04/18/2026 15:28:01 PAGE 4   
+
+   CODE SIZE        =    367    ----
+   CONSTANT SIZE    =     52    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =     14       2
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
